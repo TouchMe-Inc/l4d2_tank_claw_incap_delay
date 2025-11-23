@@ -2,61 +2,137 @@
 #pragma newdecls                required
 
 #include <sourcemod>
+#include <left4dhooks>
 
 
 public Plugin myinfo = {
-	name = "TankClawIncapDelay",
-	author = "Confogl Team",
+	name        = "TankClawIncapDelay",
+	author      = "Confogl Team, Forgetest",
 	description = "The tank sends the survivor flying before he is incapacitated",
-	version = "build0000",
-	url = "https://github.com/TouchMe-Inc/l4d2_tank_claw_incap_delay"
+	version     = "build0001",
+	url         = "https://github.com/TouchMe-Inc/l4d2_tank_claw_incap_delay"
 }
 
 
 #define TEAM_SURVIVOR           2
 
 
-ConVar g_cvSurvivorIncapHealth = null;
+/* sm_tank_flying_incap_anim_fix */
+ConVar g_cvAnimFix = null;
+bool g_bAnimFix = false;
+
+
+float g_fIncapTime[MAXPLAYERS + 1] = {0.0, ...};
+
+int g_iIncap[MAXPLAYERS + 1] = {0, ...};
 
 
 public void OnPluginStart()
 {
-	g_cvSurvivorIncapHealth = FindConVar("survivor_incap_health");
+	g_cvAnimFix = CreateConVar("sm_tank_flying_incap_anim_fix", "0", "Remove the getting-up animation at the end of fly (NOTE: Survivors will be able to shoot as soon as they land)");
+
+	g_bAnimFix = GetConVarBool(g_cvAnimFix);
+	HookConVarChange(g_cvAnimFix, CvChange_AnimFix);
 
 	HookEvent("player_incapacitated", Event_PlayerIncapacitated);
 }
 
+public void OnMapStart()
+{
+    for (int i = 1; i <= MaxClients; ++i)
+    {
+        g_fIncapTime[i] = 0.0;
+    }
+}
+
+void CvChange_AnimFix(ConVar cv, const char[] szOldValue, const char[] szValue) {
+	g_bAnimFix = GetConVarBool(cv);
+}
+
 void Event_PlayerIncapacitated(Event event, const char[] sEventName, bool bDontBroadcast)
 {
-	char sWeapon[32];
-	GetEventString(event, "weapon", sWeapon, sizeof(sWeapon));
+	char szWeapon[32];
+	GetEventString(event, "weapon", szWeapon, sizeof(szWeapon));
 
-	if (strcmp(sWeapon, "tank_claw") != 0) {
+	if (strcmp(szWeapon, "tank_claw") != 0) {
 		return;
 	}
 
-	int iClient = GetClientOfUserId(GetEventInt(event, "userid"));
+	int iClientId = GetEventInt(event, "userid");
+	int iClient = GetClientOfUserId(iClientId);
 
 	if (!iClient || !IsClientInGame(iClient) || !IsClientSurvivor(iClient)) {
 		return;
 	}
 
-	SetEntProp(iClient, Prop_Send, "m_isIncapacitated", 0, 1);
-	SetEntityHealth(iClient, 1);
+	g_fIncapTime[iClient] = GetGameTime();
 
-	CreateTimer(0.3, Timer_PlayerIncapacitated, iClient, TIMER_FLAG_NO_MAPCHANGE);
+	if (g_bAnimFix) {
+		RequestFrame(NextFrame_HookAnimation, iClientId);
+	}
 }
 
-Action Timer_PlayerIncapacitated(Handle hTimer, int iClient)
+void NextFrame_HookAnimation(int iClientId)
 {
-	if (!IsClientInGame(iClient) || !IsClientSurvivor(iClient)) {
-		return Plugin_Stop;
+    int iClient = GetClientOfUserId(iClientId);
+    if (!iClient || !IsClientInGame(iClient) || !IsClientSurvivor(iClient)) {
+        return;
 	}
 
-	SetEntProp(iClient, Prop_Send, "m_isIncapacitated", 1, 1);
-	SetEntityHealth(iClient, GetConVarInt(g_cvSurvivorIncapHealth));
+    if (!IsPlayerAlive(iClient)) {
+        return;
+	}
 
-	return Plugin_Stop;
+    if (!GetEntProp(iClient, Prop_Send, "m_isIncapacitated")) {
+        return;
+	}
+
+    AnimHookEnable(iClient, AnimHook_PunchFly);
+}
+
+Action AnimHook_PunchFly(int client, int &activity)
+{
+    switch (activity)
+    {
+    	case L4D2_ACT_TERROR_HIT_BY_TANKPUNCH,
+            L4D2_ACT_TERROR_IDLE_FALL_FROM_TANKPUNCH,
+            L4D2_ACT_TERROR_JUMP_LANDING,
+            L4D2_ACT_TERROR_JUMP_LANDING_HARD,
+	        L4D2_ACT_DEPLOY_PISTOL:
+        {
+            return Plugin_Continue;
+        }
+
+    	// Skip the getting up from ground animation
+    	case L4D2_ACT_TERROR_TANKPUNCH_LAND:
+        {
+            PlayerAnimState.FromPlayer(client).m_bIsPunchedByTank = false;  // no longer in punched animation
+
+            activity = L4D2_ACT_DIESIMPLE;  // incap animation intro
+        }
+    }
+
+    AnimHookDisable(client, AnimHook_PunchFly);
+    return Plugin_Changed;
+}
+
+public Action L4D_TankClaw_OnPlayerHit_Pre(int tank, int claw, int player)
+{
+    g_iIncap[player] = GetEntProp(player, Prop_Send, "m_isIncapacitated");
+
+    if (GetGameTime() == g_fIncapTime[player]) {
+        SetEntProp(player, Prop_Send, "m_isIncapacitated", 0);
+    }
+
+    return Plugin_Continue;
+}
+
+public void L4D_TankClaw_OnPlayerHit_Post(int tank, int claw, int player) {
+    SetEntProp(player, Prop_Send, "m_isIncapacitated", g_iIncap[player]);
+}
+
+public void L4D_TankClaw_OnPlayerHit_PostHandled(int tank, int claw, int player) {
+    SetEntProp(player, Prop_Send, "m_isIncapacitated", g_iIncap[player]);
 }
 
 /**
